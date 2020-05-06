@@ -1,330 +1,99 @@
-var io = require("socket.io")(9090);
-var uid = require('uid');
+var express = require('express')
+var fs = require('fs')
+var bodyParser = require('body-parser')
+var socketIO = require('socket.io')
+var app = express()
+var http = require('http')
+var server = http.Server(app);
+var io = socketIO(server);
+server.listen(5000); //port สำหรับ socket.io unity => server
 
 
-const express = require('express')
-const app = express()
-const mongoose = require('mongoose')
-const Player = require('./player')
-
-const MONGODB_URI =
-  process.env.MONGODB_URI || 'mongodb://localhost:27017/player'
-const PORT = process.env.PORT || 9000
-
-
-mongoose.connect(MONGODB_URI, { useNewUrlParser: true })
-
-mongoose.connection.on('error', err => {
-    console.error('MongoDB error', err)
-  })
-  
-app.use(express.json())
-
-app.get('/players', async (req, res) => {
-    const player = await Player.find({})
-    res.json(player)
-})
-
-app.get('/players/:id', async (req, res) => {
-    const { id } = req.params
-  
-    try {
-      const player = await Player.findById(id)
-      res.json(player)
-    } catch (error) {
-      res.status(400).json(error)
+var mongoose = require('mongoose')
+var Schema = mongoose.Schema //สร้าง database ชื่อ playerSchema
+var playerSchema = new Schema(
+    {
+       
+        name: String, //ตั้ง key ชื่อ name ,type เป็น string
+        score: Number //ตั้ง key ชื่อ score ,type เป็น number
     }
-  })
+);
 
-app.post('/players', async (req, res) => {
-    const payload = req.body
-    try {
-      const player = new Player(payload)
-      await player.save()
-      res.status(201).end()
-      console.log(player.name+" has register in server and password is "+player.password);
-    } catch (error) {
-      res.status(400).json(error)
-    }
-    
-})
+mongoose.connect('mongodb://localhost:27017/gamedb1',{ useFindAndModify: false }); //mongoose เชื่อมต่อฐานข้อมูล
 
-app.put('/players/:id', async (req, res) => {
-    const payload = req.body
-    const { id } = req.params
-  
-    try {
-      const player = await Player.findByIdAndUpdate(id, { $set: payload })
-      res.json(player)
-    } catch (error) {
-      res.status(400).json(error)
-    }
-  })
-
- 
+var Player = mongoose.model('Player',playerSchema,'player'); //สร้างโมเดลไว้ใช้งานสำหรับ GET PUT DELETE POST
 
 
-var playerIDList = [];
+var app = express() //เปิดใช้งาน Express
 
-var roomIDList = [];
-var roomDataList = {};
+app.use(bodyParser.urlencoded({extended:false})) // ใช้การแปลง string กับ json
+app.use(bodyParser.json()) // ใช้การแปลง string กับ json
 
-io.on("connection", (socket)=>{
 
-    console.log("client connected : "+socket.id);
 
-    //socket.join("lobby"+uid());
+io.on("connection", (socket)=>{  //เปิด Eventเมื่อ cilent เชื่อมต่อมาที่เซิฟเวอร์
 
-    ClientConnect(io, socket);
+    console.log("client connected : "+socket.id); //server แสดง log ขึ้นมาว่ามี Cilent เชื่อมต่อ และมี id อะไร
 
-    ClientFetchPlayerList(socket);
+   
+    socket.on("disconnect", ()=>{ //เปิด Eventเมื่อ cilent ตัดการเชื่อมต่อจากเซิฟเวอร์
 
-    ClientCreateRoom(socket);
+        console.log("client disconnected : "+socket.id); //server แสดง log ขึ้นมาว่ามี Cilent ตัดการเชื่อมต่อ และมี id อะไร
 
-    ClientJoinRoom(socket);
-
-    ClientLeaveRoom(socket);
-
-    ClientFetchRoomList(socket);
-
-    
-
-   // ClientUpdateMove(socket);
-
-    
-
-    socket.on("disconnect", ()=>{
-
-        console.log("client disconnected : "+socket.id);
-
-        ClientDisconnect(io, socket);
+        
     });
+
+    socket.emit('usersID') //ส่งevent ที่ชื่อ usersID เพื่อให้ Cilent รู้ว่า ID ตัวเองคืออะไร
 });
 
-setInterval(()=>{
+app.post('/player/register',function(req,res){ //สร้างข้อมูลที่ได้รับจาก Cilent 
 
-    for(var i = 0; i < roomIDList.length; i++)
-    {
-        var roomName = roomIDList[i];
-        for(var j = 0; j < roomDataList[roomName].sockets.length; j++)
-        {
-            var socket = roomDataList[roomName].sockets[j];
-
-            if(socket != undefined)
-            {
-                socket.emit("OnClientUpdateMoveList", roomDataList[roomName].playerData);
-            }
-        }
-    }
-
-}, 100);
-
-
-var ClientConnect = (io, socket)=>{
-
-    var data = {
-        "uid":socket.id
-    };
-
-    CountPlayer();
-
-    socket.emit("OnOwnerClientConnect", data);
-}
-
-var ClientDisconnect = (io, socket)=>{
-
-    var data = {
-        "uid":socket.id
-    };
-
-    /*for(var i = 0; i < playerIDList.length; i++)
-    {
-        if(playerIDList[i] == data.uid)
-        {
-            playerIDList.splice(i, 1);
-            console.log("delete player : " + data.uid);
-        }
-    }*/
-
-    LeaveRoom(socket);
-
-    CountPlayer();
-
-    io.emit("OnClientDisconnect", data);
-}
-
-var ClientFetchPlayerList = (socket)=>{
-
-    socket.on("OnClientFetchPlayerList", (data)=>{
-
-        var isRoomFound = (element)=>{
-            return element == data.roomName;
-        }
-
-        var roomName = data.roomName;
-
-        if(roomIDList.find(isRoomFound) != undefined)
-        {
-            var playerIds = [];
-
-            for(var i = 0; i < roomDataList[roomName].sockets.length; i++)
-            {
-                playerIds.push(roomDataList[roomName].sockets[i].id);
-            }
-
-            var data = {
-                "playerIDList": playerIds,
-            }
-            socket.emit("OnClientFetchPlayerList", data);
-        }
-        else
-        {
-            var data = {};
-            socket.emit("OnClientFetchPlayerList", data);
-        }
+    var p = req.body            //สร้างตัวแปร p สำหรับเป็นตัวหลักของข้อมูล
+    console.log(req.body)
+    Player.init()
+    var player = new Player({ //สร้างตัวแปร player สำหรับรับข้อมูล
+        
+        name:p.name,            //สร้างตัวแปร name เป็นตัวย่อยของ p
+        score:p.score,          //สร้างตัวแปร score เป็นตัวย่อยของ p
+        
     });
-} 
 
-var CountPlayer = ()=>{
-    console.log("Player total : "+ playerIDList.length);
-}
-
-
-var ClientFetchRoomList = (socket)=>{
+    player.save(function(err){  //ทำการบันทึกลงฐานข้อมูล
+        if(err){                //หากมี error ให้แสดง error
+            console.log(err);
+        }
+        console.log('_id Users is '+player._id); //แสดง log ไอดีของ player ที่เข้ามา
+    });
     
-    socket.on("OnClientFetchRoomList", ()=>{
-
-        data = {
-            "roomIDList":roomIDList
-        }
-
-        socket.emit("OnClientFetchRoomList", data);
-    });
-}
-
-var ClientCreateRoom = (socket)=>{
-    //roomName : string
-    socket.on("OnClientCreateRoom", data=>{
-        console.log("ClientCreateRoom : "+socket.id +" : "+data.roomName);
-
-        var isRoomFound = (element)=>{
-            return element == data.roomName;
-        }
-
-        if(roomIDList.find(isRoomFound) != undefined || data.roomName == ""){
-            console.log("ClientCreateRoom : fail");
-            socket.emit("OnClientCreateRoomFail", data);
-        }else{
-            roomIDList.push(data.roomName);
-            roomDataList[data.roomName] = {
-                "sockets": [socket],
-                "playerData": {},
-            };
-
-            var resultData = {
-                uid: socket.id
-            };
+    io.emit('userID', player); //ส่งข้อมูล player ไปหา cilent
 
 
-            socket.join(data.roomName, ()=>{
-                console.log("CientCreatRoom : success");
-                socket.emit("OnClientCreateRoomSuccess", resultData);
-            });
-        }
-        
-    });
-}
+    
+    res.end('{"ok":1}')   //หากสำเร็จให้ขึ้นโชว์ที่ postman เป็น json ว่า {"ok":1}
+});
 
-var ClientJoinRoom = (socket)=>{
-    socket.on("OnClientJoinRoom", (data)=>{
-        console.log("ClientJoinRoom");
+app.put('/player/register/:id',async (req, res)=>{ //อัพเดตข้อมูลผ่าน ID ของข้อมูล
+    const payload = req.body
+    const { id } = req.params
+    
 
-        var isRoomFound = (element)=>{
-            return element == data.roomName;
-        };
+  try {
+    const player = await Player.findByIdAndUpdate(id, { $set: payload }) //ทำการค้นหาจาก ID ที่ได้รับ
+    res.json(player)
+    console.log(player._id);
+  } catch (error) {
+    res.status(400).json(error)
+    
+  }
+  
+})
 
-        if(roomIDList.find(isRoomFound) != undefined && data.roomName != ""){
-            
-           
-            roomDataList[data.roomName].sockets.push(socket);
 
-            var resultData = {
-                uid: socket.id
-            };
 
-            socket.join(data.roomName, ()=>{
-                console.log("ClientJoinRoom : success");
-                socket.emit("OnOwnerClientJoinRoomSuccess", resultData);
-                socket.broadcast.to(data.roomName).emit("OnClientJoinRoomSuccess", resultData);
-            });
 
-        }else{
-            console.log("ClientJoinRoom : fail");
-            socket.emit("OnClientJoinRoomFail", data);
-        }
-    });
-}
 
-var ClientLeaveRoom = (socket)=>{
+app.listen(8080,function(){             //port ของ express
+    console.log('Server running')
+});
 
-    socket.on("OnClientLeaveRoom", ()=>{
-        console.log("client leave room");
-        LeaveRoom(socket);
-    });
-}
-
-var LeaveRoom = (socket)=>{
-
-    for(var i = 0; i < roomIDList.length;i++)
-    {
-        var roomName = roomIDList[i];
-
-        for(var j = 0; j < roomDataList[roomName].sockets.length; j++)
-        {
-            if(roomDataList[roomName].sockets[j].id == socket.id)
-            {
-                roomDataList[roomName].sockets.splice(j,1);
-                
-                delete roomDataList[roomName].playerData[socket.id];
-
-                var data = {
-                    uid: socket.id
-                };
-
-                socket.broadcast.to(roomName).emit("OnClientLeaveRoom", data);
-                socket.emit("OnClientLeaveRoom", data);
-                socket.leave(roomName);
-
-                break;
-            }
-        }
-
-        if(roomDataList[roomName].sockets.length <= 0)
-        {
-            roomIDList.splice(i, 1);
-            delete roomDataList[roomName];
-            break;
-        }
-    }
-}
-
-/*var ClientUpdateMove = (socket)=>{
-
-    socket.on("OnClientUpdateMove", (data)=>{
-
-        if(roomDataList[data.roomName] != undefined)
-        {
-            roomDataList[data.roomName].playerData[data.uid] = {
-                x: data.x,
-                y: data.y,
-                z: data.z,
-            };
-        }
-        
-
-    });
-}*/
-
-app.listen(PORT, () => {
-    console.log(`Application is running on port ${PORT}`)
-  })
+console.log('start server')
